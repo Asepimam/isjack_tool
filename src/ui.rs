@@ -53,7 +53,7 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     let tabs = Tabs::new(titles)
         .block(
             Block::default()
-                .title(Span::styled("  ISO-JSON TUI Tool  ", Style::default().fg(COLOR_ACCENT).add_modifier(Modifier::BOLD)))
+                .title(Span::styled("  ISJACK Tool  ", Style::default().fg(COLOR_ACCENT).add_modifier(Modifier::BOLD)))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(COLOR_BORDER)),
         )
