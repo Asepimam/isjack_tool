@@ -8,14 +8,14 @@ A Rust terminal UI app with two tools:
 
 ```bash
 # Extract source
-tar -xzf iso_json_tool_src.tar.gz
-cd iso_json_tool
+tar -xzf isjack_tool_src.tar.gz
+cd isjack_tool
 
 # Build (requires Rust 1.74+)
 cargo build --release
 
 # Run
-./target/release/iso_json_tool
+./target/release/isjack_tool
 ```
 
 ## Key Bindings
