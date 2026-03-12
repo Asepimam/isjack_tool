@@ -289,8 +289,13 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let max_status_width = area.width.saturating_sub(right_info.len() as u16 + 2) as usize;
-    let status_text = if app.status.len() > max_status_width {
-        format!(" {}…", &app.status[..max_status_width.saturating_sub(1)])
+    let status_text = if app.status.chars().count() > max_status_width {
+        let truncated: String = app
+            .status
+            .chars()
+            .take(max_status_width.saturating_sub(1))
+            .collect();
+        format!(" {}…", truncated)
     } else {
         format!(" {}", app.status)
     };
