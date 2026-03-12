@@ -1,4 +1,4 @@
-# ISO-JSON TUI Tool
+# IsJack Tool
 
 A Rust terminal UI app with two tools:
 1. **JSON Beautify/Minify** — paste JSON to format/compress it
