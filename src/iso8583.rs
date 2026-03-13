@@ -1,3 +1,6 @@
+// ISO 8583 decoder
+#![allow(dead_code)]
+
 /// ISO 8583 Field Definition
 #[derive(Clone)]
 pub struct FieldDef {
@@ -622,11 +625,13 @@ pub fn detect_format(input: &str) -> &'static str {
 ///   S.Bitmap   = 16 HEX chars   (only if bit-1 of P.Bitmap is set)
 ///   Field data = raw ASCII, each field by its own length rule
 pub fn decode_raw(input: &str) -> DecodeResult {
-    // Strip only carriage returns and newlines; spaces inside hex bitmaps
-    // are intentional separators some tools add — also strip those.
-    let raw: String = input.chars()
-        .filter(|c| *c != '\r' && *c != '\n')
-        .collect();
+    // Strip line-wrapping artifacts: join lines, trimming each line's leading/trailing
+    // whitespace. This handles copy-paste line breaks WITHOUT stripping internal spaces
+    // that are valid inside field values (e.g. "455 ms" in JSON, "JOHN DOE" in name fields).
+    let raw: String = input.lines()
+        .map(|line| line.trim())
+        .collect::<Vec<_>>()
+        .join("");
 
     let chars: Vec<char> = raw.chars().collect();
 

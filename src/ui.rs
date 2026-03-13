@@ -1,312 +1,584 @@
+//! Ratatui rendering — ISJack-Tools
+//! Input and output panes both use visual-row word-wrap + scroll.
+
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, Paragraph, Tabs},
 };
+use crate::app::{ActiveTab, App, Focus, InputBuffer, KeyOp, SimMode};
 
-use crate::app::{ActiveTab, App, Focus, IsoMode, JsonMode};
+const TAB_TITLES: [&str; 6] = [
+    " F1 JSON ", " F2 ISO 8583 ", " F3 TLV/EMV ", " F4 Key Mgmt ", " F5 Simulator ", " F6 Settlement ",
+];
 
-const TAB_TITLES: [&str; 2] = [" 󰘦 JSON Beautify/Minify ", " 󰙧 ISO 8583 Decoder "];
-const COLOR_ACCENT: Color  = Color::Cyan;
-const COLOR_ACTIVE: Color  = Color::Yellow;
-const COLOR_BORDER: Color  = Color::DarkGray;
-const COLOR_FOCUSED:Color  = Color::Cyan;
-const COLOR_ERROR:  Color  = Color::Red;
-const COLOR_OK:     Color  = Color::Green;
-const COLOR_DIM:    Color  = Color::DarkGray;
-const COLOR_BG:     Color  = Color::Reset;
+// ─── Entry point ──────────────────────────────────────────────────────────────
 
-pub fn draw(f: &mut Frame, app: &mut App) {
+pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
-
-    // ── Root layout: header + body + status ──
-    let root = Layout::default()
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),  // tabs header
-            Constraint::Min(10),    // main body
-            Constraint::Length(1),  // status bar
-        ])
+        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
         .split(area);
 
-    draw_tabs(f, app, root[0]);
-    draw_body(f, app, root[1]);
-    draw_status(f, app, root[2]);
+    draw_tabs(f, app, chunks[0]);
+    draw_content(f, app, chunks[1]);
+    draw_status(f, app, chunks[2]);
 }
+
+// ─── Tab bar ─────────────────────────────────────────────────────────────────
 
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
-    let tab_idx = match app.active_tab {
-        ActiveTab::Json   => 0,
-        ActiveTab::Iso8583 => 1,
-    };
-
-    let titles: Vec<Line> = TAB_TITLES.iter().enumerate().map(|(i, t)| {
-        if i == tab_idx {
-            Line::from(Span::styled(*t, Style::default().fg(COLOR_ACTIVE).add_modifier(Modifier::BOLD)))
+    let selected = app.active_tab.index();
+    let titles: Vec<Line> = TAB_TITLES.iter().enumerate().map(|(i, &t)| {
+        let style = if i == selected {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
         } else {
-            Line::from(Span::styled(*t, Style::default().fg(COLOR_DIM)))
-        }
+            Style::default().fg(Color::DarkGray)
+        };
+        Line::from(Span::styled(t, style))
     }).collect();
 
-    let tabs = Tabs::new(titles)
-        .block(
-            Block::default()
-                .title(Span::styled("  ISJACK Tool  ", Style::default().fg(COLOR_ACCENT).add_modifier(Modifier::BOLD)))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(COLOR_BORDER)),
-        )
-        .select(tab_idx)
-        .highlight_style(Style::default().fg(COLOR_ACTIVE).add_modifier(Modifier::BOLD));
-
-    f.render_widget(tabs, area);
+    f.render_widget(
+        Tabs::new(titles)
+            .select(selected)
+            .block(Block::default().borders(Borders::ALL).title(" ⬡ ISJack-Tools v1.0 — Payment Gateway Toolkit "))
+            .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        area,
+    );
 }
 
-fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
-    // Split body into left (input) and right (output)
-    let body = Layout::default()
+fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
+    match app.active_tab {
+        ActiveTab::Json       => draw_split(f, app, area, 40,
+            " Input — 's' mode │ 'n' sample │ Ctrl+A select all │ Ctrl+Shift+C/X/V copy/cut/paste ",
+            " Output — Space=run │ ↑↓ PgUp PgDn scroll "),
+        ActiveTab::Iso8583    => draw_split(f, app, area, 35,
+            " Input — 'd' mode │ 'n' sample │ paste ISO message ",
+            " Output — Space=decode │ ↑↓ PgUp PgDn scroll "),
+        ActiveTab::Tlv        => draw_split(f, app, area, 35,
+            " Input — TLV/EMV hex │ 'n' sample ",
+            " Output — Space=decode │ ↑↓ PgUp PgDn scroll "),
+        ActiveTab::KeyMgmt    => draw_key_mgmt(f, app, area),
+        ActiveTab::Simulator  => draw_simulator(f, app, area),
+        ActiveTab::Settlement => draw_split(f, app, area, 45,
+            " Input — CSV │ 'r' reload sample ",
+            " Report — Space=parse │ ↑↓ PgUp PgDn scroll "),
+    }
+}
+
+// ─── Generic split pane ───────────────────────────────────────────────────────
+
+fn draw_split(f: &mut Frame, app: &mut App, area: Rect, in_pct: u16,
+              in_title: &'static str, out_title: &'static str)
+{
+    let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(45),
-            Constraint::Percentage(55),
-        ])
+        .constraints([Constraint::Percentage(in_pct), Constraint::Percentage(100 - in_pct)])
         .split(area);
 
-    let input_area  = body[0];
-    let output_area = body[1];
+    let in_focused  = app.focus == Focus::Input;
+    let out_focused = app.focus == Focus::Output;
 
-    match app.active_tab {
-        ActiveTab::Json    => draw_json_panes(f, app, input_area, output_area),
-        ActiveTab::Iso8583 => draw_iso_panes(f, app, input_area, output_area),
-    }
+    // ── INPUT ────────────────────────────────────────────────────────────────
+    let in_block = Block::default()
+        .borders(Borders::ALL)
+        .title(if in_focused { format!("▶{}", in_title) } else { in_title.to_string() })
+        .border_style(border_style(in_focused));
+    let in_inner = in_block.inner(chunks[0]);
+    f.render_widget(in_block, chunks[0]);
+
+    // sync scroll with real viewport height, then render
+    sync_and_render_input(f, app, in_inner, in_focused);
+
+    // ── OUTPUT ───────────────────────────────────────────────────────────────
+    let out_block = Block::default()
+        .borders(Borders::ALL)
+        .title(if out_focused { format!("▶{}", out_title) } else { out_title.to_string() })
+        .border_style(border_style(out_focused));
+    let out_inner = out_block.inner(chunks[1]);
+    f.render_widget(out_block, chunks[1]);
+
+    render_output(f, app, out_inner);
 }
 
-// ─────────────────────────────────────────────────────────── JSON ──
+/// Sync scroll for the active input buffer using the actual viewport height,
+/// then render the wrapped content.
+fn sync_and_render_input(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
+    // We need the pane width to know how lines wrap
+    let width = area.width.max(4) as usize;
+    let height = area.height as usize;
 
-fn draw_json_panes(f: &mut Frame, app: &mut App, input_area: Rect, output_area: Rect) {
-    let mode_label = match app.json_mode {
-        JsonMode::Beautify => "Beautify",
-        JsonMode::Minify   => "Minify  ",
+    // Get a snapshot of what we need (to avoid borrow split issues)
+    let (logical_lines, cursor_row, cursor_col, sel_anchor) = {
+        let buf = active_input_buf(app);
+        (buf.lines.clone(), buf.cursor_row, buf.cursor_col, buf.sel_anchor)
     };
 
-    let input_focused  = app.focus == Focus::Input;
-    let output_focused = app.focus == Focus::Output;
+    // Pre-compute visual rows
+    let visual = build_visual_rows(&logical_lines, width);
 
-    // ── Input pane ──
-    let input_border_style = if input_focused {
-        Style::default().fg(COLOR_FOCUSED)
-    } else {
-        Style::default().fg(COLOR_BORDER)
-    };
+    // Find which visual row the cursor is on
+    let cursor_visual = visual.iter().position(|vr| {
+        vr.logical_row == cursor_row
+            && cursor_col >= vr.char_start
+            && (cursor_col < vr.char_start + vr.char_len || vr.is_last_of_logical)
+    }).unwrap_or(0);
 
-    let input_title = if input_focused {
-        format!(" INPUT [Mode: {} | F6: toggle] ", mode_label)
-    } else {
-        format!(" INPUT [Mode: {}] ", mode_label)
-    };
-
-    // Sync scroll
-    app.json_input.sync_scroll(input_area.height);
-
-    // Build text lines with cursor highlight
-    let lines = render_input_lines(&app.json_input, input_area, input_focused);
-
-    let input_paragraph = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .title(Span::styled(input_title, Style::default().fg(if input_focused { COLOR_ACTIVE } else { COLOR_BORDER })))
-                .borders(Borders::ALL)
-                .border_style(input_border_style),
-        )
-        .scroll((app.json_input.scroll, 0));
-
-    f.render_widget(input_paragraph, input_area);
-
-    // ── Output pane ──
-    let output_border_style = if output_focused {
-        Style::default().fg(COLOR_FOCUSED)
-    } else {
-        Style::default().fg(COLOR_BORDER)
-    };
-
-    let out_lines: usize = app.json_output.content.lines().count();
-    let output_paragraph = Paragraph::new(app.json_output.content.as_str())
-        .block(
-            Block::default()
-                .title(Span::styled(
-                    format!(" OUTPUT ({} lines) ", out_lines),
-                    Style::default().fg(if output_focused { COLOR_ACTIVE } else { COLOR_BORDER }),
-                ))
-                .borders(Borders::ALL)
-                .border_style(output_border_style),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((app.json_output.scroll, 0));
-
-    f.render_widget(output_paragraph, output_area);
-
-    // ── Help overlay (bottom of input when focused) ──
-    if input_focused {
-        draw_help_hint(f, input_area, "F5:Process  F6:Mode  Ctrl+L:Clear  Tab:→Output");
-    }
-    if output_focused {
-        draw_help_hint(f, output_area, "↑↓/PgUp/PgDn:Scroll  g:Top  G:Bottom  Tab:→Input");
-    }
-}
-
-// ──────────────────────────────────────────────────────── ISO 8583 ──
-
-fn draw_iso_panes(f: &mut Frame, app: &mut App, input_area: Rect, output_area: Rect) {
-    let input_focused  = app.focus == Focus::Input;
-    let output_focused = app.focus == Focus::Output;
-
-    // ── Input pane ──
-    let input_border_style = if input_focused {
-        Style::default().fg(COLOR_FOCUSED)
-    } else {
-        Style::default().fg(COLOR_BORDER)
-    };
-
-    app.iso_input.sync_scroll(input_area.height);
-
-    let lines = render_input_lines(&app.iso_input, input_area, input_focused);
-
-    let input_paragraph = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .title(Span::styled(
-                    if input_focused { " HEX INPUT [ASCII encoding] " } else { " HEX INPUT " },
-                    Style::default().fg(if input_focused { COLOR_ACTIVE } else { COLOR_BORDER }),
-                ))
-                .borders(Borders::ALL)
-                .border_style(input_border_style),
-        )
-        .scroll((app.iso_input.scroll, 0));
-
-    f.render_widget(input_paragraph, input_area);
-
-    // ── Output pane ──
-    let output_border_style = if output_focused {
-        Style::default().fg(COLOR_FOCUSED)
-    } else {
-        Style::default().fg(COLOR_BORDER)
-    };
-
-    let out_lines: usize = app.iso_output.content.lines().count();
-    let output_paragraph = Paragraph::new(app.iso_output.content.as_str())
-        .block(
-            Block::default()
-                .title(Span::styled(
-                    format!(" DECODE RESULT ({} lines) ", out_lines),
-                    Style::default().fg(if output_focused { COLOR_ACTIVE } else { COLOR_BORDER }),
-                ))
-                .borders(Borders::ALL)
-                .border_style(output_border_style),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((app.iso_output.scroll, 0));
-
-    f.render_widget(output_paragraph, output_area);
-
-    if input_focused {
-        let iso_hint = match app.iso_mode {
-            IsoMode::Hex => "F5:Decode  F6:→RAW mode  Ctrl+L:Clear  Tab:→Output",
-            IsoMode::Raw => "F5:Decode  F6:→HEX mode  Ctrl+L:Clear  Tab:→Output",
-        };
-        draw_help_hint(f, input_area, iso_hint);
-    }
-    if output_focused {
-        draw_help_hint(f, output_area, "↑↓/PgUp/PgDn:Scroll  g:Top  G:Bottom  Tab:→Input");
-    }
-}
-
-// ─────────────────────────────────────────────────────── Helpers ──
-
-/// Render input buffer lines with cursor highlight
-fn render_input_lines<'a>(buf: &'a crate::app::InputBuffer, _area: Rect, focused: bool) -> Vec<Line<'a>> {
-    buf.lines.iter().enumerate().map(|(row, line)| {
-        if focused && row == buf.cursor_row {
-            // Highlight cursor position
-            let chars: Vec<char> = line.chars().collect();
-            let col = buf.cursor_col.min(chars.len());
-
-            let before: String = chars[..col].iter().collect();
-            let cursor_char: String = if col < chars.len() {
-                chars[col].to_string()
-            } else {
-                " ".to_string()
-            };
-            let after: String = if col < chars.len() {
-                chars[col + 1..].iter().collect()
-            } else {
-                String::new()
-            };
-
-            Line::from(vec![
-                Span::raw(before),
-                Span::styled(cursor_char, Style::default().bg(COLOR_ACCENT).fg(Color::Black)),
-                Span::raw(after),
-            ])
+    // Sync scroll in visual-row space
+    {
+        let buf = active_input_buf_mut(app);
+        let vis = height.max(1);
+        let scroll = buf.scroll as usize;
+        let new_scroll = if cursor_visual < scroll {
+            cursor_visual as u16
+        } else if cursor_visual >= scroll + vis {
+            (cursor_visual - vis + 1) as u16
         } else {
-            Line::from(Span::raw(line.as_str()))
+            buf.scroll
+        };
+        buf.scroll = new_scroll;
+    }
+
+    let scroll = active_input_buf(app).scroll as usize;
+
+    // Render visible visual rows
+    let rendered: Vec<Line> = visual.iter()
+        .skip(scroll)
+        .take(height)
+        .map(|vr| {
+            let line = &logical_lines[vr.logical_row];
+            let chars: Vec<char> = line.chars().collect();
+            let seg_chars = &chars[vr.char_start..(vr.char_start + vr.char_len).min(chars.len())];
+            let seg: String = seg_chars.iter().collect();
+
+            if focused && vr.logical_row == cursor_row {
+                // Check if cursor is within this visual segment
+                let local_col = cursor_col.saturating_sub(vr.char_start);
+                if cursor_col >= vr.char_start && (cursor_col < vr.char_start + vr.char_len || vr.is_last_of_logical) {
+                    make_cursor_line(&seg, local_col, vr.is_continuation)
+                } else if vr.is_continuation {
+                    Line::from(vec![
+                        Span::styled("↩ ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(seg),
+                    ])
+                } else {
+                    // Highlight entire row as active line
+                    Line::from(Span::styled(seg, Style::default().fg(Color::White)))
+                }
+            } else if vr.is_continuation {
+                Line::from(vec![
+                    Span::styled("↩ ", Style::default().fg(Color::DarkGray)),
+                    colorize_input_line(&seg),
+                ])
+            } else {
+                Line::from(colorize_input_line(&seg))
+            }
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(rendered), area);
+
+    let _ = sel_anchor; // future: use for selection highlight
+}
+
+fn active_input_buf(app: &App) -> &InputBuffer {
+    match app.active_tab {
+        ActiveTab::Json       => &app.json_input,
+        ActiveTab::Iso8583    => &app.iso_input,
+        ActiveTab::Tlv        => &app.tlv_input,
+        ActiveTab::Settlement => &app.settle_input,
+        ActiveTab::KeyMgmt    => &app.key_field[app.key_focus_field.min(2) as usize],
+        ActiveTab::Simulator  => &app.sim_message,
+    }
+}
+
+fn active_input_buf_mut(app: &mut App) -> &mut InputBuffer {
+    match app.active_tab {
+        ActiveTab::Json       => &mut app.json_input,
+        ActiveTab::Iso8583    => &mut app.iso_input,
+        ActiveTab::Tlv        => &mut app.tlv_input,
+        ActiveTab::Settlement => &mut app.settle_input,
+        ActiveTab::KeyMgmt    => {
+            let f = app.key_focus_field.min(2) as usize;
+            &mut app.key_field[f]
         }
-    }).collect()
+        ActiveTab::Simulator  => &mut app.sim_message,
+    }
 }
 
-/// Draw a small hint bar at the bottom of an area (inside the border)
-fn draw_help_hint(f: &mut Frame, area: Rect, hint: &str) {
-    if area.height < 4 { return; }
-    let hint_area = Rect {
-        x: area.x + 1,
-        y: area.y + area.height - 2,
-        width: area.width.saturating_sub(2),
-        height: 1,
+/// Render the active output buffer with word-wrap and syntax colouring.
+fn render_output(f: &mut Frame, app: &mut App, area: Rect) {
+    let width  = area.width.max(4) as usize;
+    let height = area.height as usize;
+
+    let (content, scroll) = match app.active_tab {
+        ActiveTab::Json       => (&app.json_output.content,   app.json_output.scroll),
+        ActiveTab::Iso8583    => (&app.iso_output.content,    app.iso_output.scroll),
+        ActiveTab::Tlv        => (&app.tlv_output.content,    app.tlv_output.scroll),
+        ActiveTab::Settlement => (&app.settle_output.content, app.settle_output.scroll),
+        ActiveTab::KeyMgmt    => (&app.key_output.content,    app.key_output.scroll),
+        ActiveTab::Simulator  => (&app.sim_output.content,    app.sim_output.scroll),
     };
-    let hint_p = Paragraph::new(Span::styled(
-        format!(" {} ", hint),
-        Style::default().fg(Color::Black).bg(COLOR_DIM),
-    ));
-    f.render_widget(hint_p, hint_area);
+
+    let visual = wrap_text_lines(content, width);
+    let rendered: Vec<Line> = visual.iter()
+        .skip(scroll as usize)
+        .take(height)
+        .map(|(text, is_cont)| {
+            if *is_cont {
+                Line::from(vec![
+                    Span::styled("  ", Style::default().fg(Color::DarkGray)),
+                    colorize_output_line(text),
+                ])
+            } else {
+                Line::from(colorize_output_line(text))
+            }
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(rendered), area);
 }
 
-/// Draw status bar
+// ─── Visual row construction ──────────────────────────────────────────────────
+
+struct VisualRow {
+    logical_row:     usize,
+    char_start:      usize, // start char index in the logical line
+    char_len:        usize, // number of chars on this visual row
+    is_continuation: bool,  // not the first visual row of this logical line
+    is_last_of_logical: bool,
+}
+
+fn build_visual_rows(lines: &[String], width: usize) -> Vec<VisualRow> {
+    let w = width.max(1);
+    let mut result = Vec::new();
+    for (row_idx, line) in lines.iter().enumerate() {
+        let total_chars = line.chars().count();
+        if total_chars == 0 {
+            result.push(VisualRow {
+                logical_row: row_idx, char_start: 0, char_len: 0,
+                is_continuation: false, is_last_of_logical: true,
+            });
+            continue;
+        }
+        let mut start = 0;
+        let mut first = true;
+        while start < total_chars {
+            let end = (start + w).min(total_chars);
+            let is_last = end == total_chars;
+            result.push(VisualRow {
+                logical_row: row_idx,
+                char_start: start,
+                char_len: end - start,
+                is_continuation: !first,
+                is_last_of_logical: is_last,
+            });
+            start = end;
+            first = false;
+        }
+    }
+    result
+}
+
+fn wrap_text_lines(content: &str, width: usize) -> Vec<(String, bool)> {
+    let w = width.max(1);
+    let mut result = Vec::new();
+    for line in content.lines() {
+        if line.is_empty() {
+            result.push((String::new(), false));
+            continue;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let mut start = 0;
+        let mut first = true;
+        while start < chars.len() {
+            let end = (start + w).min(chars.len());
+            result.push((chars[start..end].iter().collect(), !first));
+            start = end;
+            first = false;
+        }
+    }
+    result
+}
+
+// ─── Key Management tab ──────────────────────────────────────────────────────
+
+fn draw_key_mgmt(f: &mut Frame, app: &mut App, area: Rect) {
+    // Dynamically include only active input fields so output gets more space
+    let active_fields = app.key_op.active_field_count() as usize;
+    let mut constraints = vec![Constraint::Length(3)]; // op bar
+    for _ in 0..active_fields { constraints.push(Constraint::Length(3)); }
+    constraints.push(Constraint::Min(0)); // output
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+
+    // Op bar
+    let op_spans: Vec<Span> = KeyOp::all().iter().map(|&op| {
+        let style = if op == app.key_op {
+            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        Span::styled(format!(" {} ", op.label()), style)
+    }).collect();
+    let op_block = Block::default().borders(Borders::ALL)
+        .title(" Operation — 'o'=cycle │ 'n'=sample │ Space=run │ Tab=next field ");
+    let op_inner = op_block.inner(chunks[0]);
+    f.render_widget(op_block, chunks[0]);
+    f.render_widget(Paragraph::new(Line::from(op_spans)), op_inner);
+
+    // Input fields — only render active ones, using dynamic chunk indices
+    let labels = app.key_op.field_labels();
+    let mut chunk_idx = 1usize;
+    for idx in 0..3usize {
+        let label = labels[idx];
+        if label.is_empty() { continue; }
+        let rect = chunks[chunk_idx];
+        chunk_idx += 1;
+        let is_focused = app.focus == Focus::Input && app.key_focus_field == idx as u8;
+        let block = Block::default().borders(Borders::ALL)
+            .title(format!(" {} ", label))
+            .border_style(border_style(is_focused));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+
+        // Sync + render with wrap
+        let width  = inner.width.max(4) as usize;
+        let height = inner.height as usize;
+        let (lines, cur_row, cur_col) = {
+            let buf = &app.key_field[idx];
+            (buf.lines.clone(), buf.cursor_row, buf.cursor_col)
+        };
+        let visual = build_visual_rows(&lines, width);
+        let cursor_visual = visual.iter().position(|vr| {
+            vr.logical_row == cur_row && cur_col >= vr.char_start
+                && (cur_col < vr.char_start + vr.char_len || vr.is_last_of_logical)
+        }).unwrap_or(0);
+        {
+            let buf = &mut app.key_field[idx];
+            let scroll = buf.scroll as usize;
+            if cursor_visual < scroll { buf.scroll = cursor_visual as u16; }
+            else if cursor_visual >= scroll + height.max(1) { buf.scroll = (cursor_visual - height + 1) as u16; }
+        }
+        let scroll = app.key_field[idx].scroll as usize;
+        let rendered: Vec<Line> = visual.iter().skip(scroll).take(height).map(|vr| {
+            let line = &lines[vr.logical_row];
+            let chars: Vec<char> = line.chars().collect();
+            let seg: String = chars[vr.char_start..(vr.char_start+vr.char_len).min(chars.len())].iter().collect();
+            if is_focused && vr.logical_row == cur_row {
+                let local = cur_col.saturating_sub(vr.char_start);
+                if cur_col >= vr.char_start && (cur_col < vr.char_start + vr.char_len || vr.is_last_of_logical) {
+                    make_cursor_line(&seg, local, vr.is_continuation)
+                } else {
+                    Line::from(Span::raw(seg))
+                }
+            } else if vr.is_continuation {
+                Line::from(vec![Span::styled("↩ ", Style::default().fg(Color::DarkGray)), Span::raw(seg)])
+            } else {
+                Line::from(Span::raw(seg))
+            }
+        }).collect();
+        f.render_widget(Paragraph::new(rendered), inner);
+    }
+
+    // Output — uses the last chunk (dynamic index)
+    let out_focused = app.focus == Focus::Output;
+    let out_chunk = chunks[chunk_idx];
+    let out_block = Block::default().borders(Borders::ALL)
+        .title(if out_focused { "▶ Result — Tab=back │ ↑↓ PgUp PgDn scroll" } else { " Result " })
+        .border_style(border_style(out_focused));
+    let out_inner = out_block.inner(out_chunk);
+    f.render_widget(out_block, out_chunk);
+    let width = out_inner.width.max(4) as usize;
+    let visual = wrap_text_lines(&app.key_output.content, width);
+    let rendered: Vec<Line> = visual.iter()
+        .skip(app.key_output.scroll as usize).take(out_inner.height as usize)
+        .map(|(t, cont)| if *cont {
+            Line::from(vec![Span::styled("  ", Style::default().fg(Color::DarkGray)), colorize_output_line(t)])
+        } else { Line::from(colorize_output_line(t)) })
+        .collect();
+    f.render_widget(Paragraph::new(rendered), out_inner);
+}
+
+// ─── Simulator tab ───────────────────────────────────────────────────────────
+
+fn draw_simulator(f: &mut Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Length(5), Constraint::Min(0)])
+        .split(area);
+
+    // Config bar
+    let running  = app.sim_server.is_running();
+    let mode_str = match app.sim_mode { SimMode::Server => "SERVER", SimMode::Client => "CLIENT" };
+    let status_span = if running {
+        Span::styled(format!(" ● RUNNING :{} ", app.sim_port), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled(" ○ STOPPED ", Style::default().fg(Color::DarkGray))
+    };
+    let cfg_line = Line::from(vec![
+        Span::styled(format!(" {} ", mode_str), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::raw(" │ "),
+        status_span,
+        Span::raw(" │ "),
+        Span::styled(format!("framing:{} ", app.sim_framing), Style::default().fg(Color::Yellow)),
+        Span::raw(" 'm'=mode │ 'f'=framing │ 'n'=sample(client) │ Space=start/stop/send"),
+    ]);
+    let cfg_block = Block::default().borders(Borders::ALL).title(" ISJack Simulator ");
+    let cfg_inner = cfg_block.inner(chunks[0]);
+    f.render_widget(cfg_block, chunks[0]);
+    f.render_widget(Paragraph::new(cfg_line), cfg_inner);
+
+    // Message input
+    let msg_title = match app.sim_mode {
+        SimMode::Client => format!(" → {}:{} — hex message (RAW or HEX-encoded) ", app.sim_host, app.sim_port),
+        SimMode::Server => format!(" Port: {} — Space to start/stop server ", app.sim_port),
+    };
+    let msg_focused = app.focus == Focus::Input;
+    let msg_block = Block::default().borders(Borders::ALL)
+        .title(msg_title)
+        .border_style(border_style(msg_focused));
+    let msg_inner = msg_block.inner(chunks[1]);
+    f.render_widget(msg_block, chunks[1]);
+
+    // Render input with wrap
+    let width  = msg_inner.width.max(4) as usize;
+    let height = msg_inner.height as usize;
+    let (lines, cur_row, cur_col) = {
+        let b = &app.sim_message;
+        (b.lines.clone(), b.cursor_row, b.cursor_col)
+    };
+    let visual = build_visual_rows(&lines, width);
+    let cur_vis = visual.iter().position(|vr| {
+        vr.logical_row == cur_row && cur_col >= vr.char_start
+            && (cur_col < vr.char_start + vr.char_len || vr.is_last_of_logical)
+    }).unwrap_or(0);
+    {
+        let b = &mut app.sim_message;
+        let sc = b.scroll as usize;
+        if cur_vis < sc { b.scroll = cur_vis as u16; }
+        else if cur_vis >= sc + height.max(1) { b.scroll = (cur_vis - height + 1) as u16; }
+    }
+    let scroll = app.sim_message.scroll as usize;
+    let rendered: Vec<Line> = visual.iter().skip(scroll).take(height).map(|vr| {
+        let lc: Vec<char> = lines[vr.logical_row].chars().collect();
+        let seg: String = lc[vr.char_start..(vr.char_start+vr.char_len).min(lc.len())].iter().collect();
+        if msg_focused && vr.logical_row == cur_row {
+            let lc2 = cur_col.saturating_sub(vr.char_start);
+            if cur_col >= vr.char_start && (cur_col < vr.char_start + vr.char_len || vr.is_last_of_logical) {
+                make_cursor_line(&seg, lc2, vr.is_continuation)
+            } else if vr.is_continuation {
+                Line::from(vec![Span::styled("↩ ", Style::default().fg(Color::DarkGray)), Span::raw(seg)])
+            } else { Line::from(Span::raw(seg)) }
+        } else if vr.is_continuation {
+            Line::from(vec![Span::styled("↩ ", Style::default().fg(Color::DarkGray)), Span::raw(seg)])
+        } else { Line::from(Span::raw(seg)) }
+    }).collect();
+    f.render_widget(Paragraph::new(rendered), msg_inner);
+
+    // Log
+    let log_focused = app.focus == Focus::Output;
+    let log_block = Block::default().borders(Borders::ALL)
+        .title(if log_focused { "▶ Log — ↑↓ PgUp PgDn scroll" } else { " Transaction Log " })
+        .border_style(border_style(log_focused));
+    let log_inner = log_block.inner(chunks[2]);
+    f.render_widget(log_block, chunks[2]);
+    let lw = log_inner.width.max(4) as usize;
+    let log_visual = wrap_text_lines(&app.sim_output.content, lw);
+    let log_lines: Vec<Line> = log_visual.iter()
+        .skip(app.sim_output.scroll as usize).take(log_inner.height as usize)
+        .map(|(l, _)| {
+            let style = if l.contains("▼ RECV") { Style::default().fg(Color::Cyan) }
+                else if l.contains("▲ SEND") { Style::default().fg(Color::Green) }
+                else if l.contains("✗ ERR")  { Style::default().fg(Color::Red) }
+                else if l.contains("INFO")   { Style::default().fg(Color::DarkGray) }
+                else { Style::default() };
+            Line::from(Span::styled(l.clone(), style))
+        }).collect();
+    f.render_widget(Paragraph::new(log_lines), log_inner);
+}
+
+// ─── Status bar ──────────────────────────────────────────────────────────────
+
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let style = if app.status_is_error {
-        Style::default().fg(COLOR_ERROR).add_modifier(Modifier::BOLD)
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(COLOR_OK)
+        Style::default().fg(Color::DarkGray)
     };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(format!(" {}", app.status), style))),
+        area,
+    );
+}
 
-    // Left side: status message
-    // Right side: tab/position info
-    let right_info = {
-        let (row, col) = match app.active_tab {
-            ActiveTab::Json    => (app.json_input.cursor_row, app.json_input.cursor_col),
-            ActiveTab::Iso8583 => (app.iso_input.cursor_row, app.iso_input.cursor_col),
-        };
-        format!(" Ln:{} Col:{} | F1:JSON  F2:ISO8583  Ctrl+Q:Quit ", row + 1, col + 1)
-    };
+// ─── Rendering helpers ────────────────────────────────────────────────────────
 
-    let max_status_width = area.width.saturating_sub(right_info.len() as u16 + 2) as usize;
-    let status_text = if app.status.chars().count() > max_status_width {
-        let truncated: String = app
-            .status
-            .chars()
-            .take(max_status_width.saturating_sub(1))
-            .collect();
-        format!(" {}…", truncated)
-    } else {
-        format!(" {}", app.status)
-    };
+fn border_style(focused: bool) -> Style {
+    if focused { Style::default().fg(Color::Yellow) }
+    else       { Style::default().fg(Color::DarkGray) }
+}
 
-    let status_line = Line::from(vec![
-        Span::styled(status_text, style),
-        Span::styled(right_info, Style::default().fg(COLOR_DIM)),
-    ]);
+/// Build a Line with the cursor character highlighted at `local_col`.
+pub fn make_cursor_line(segment: &str, local_col: usize, is_cont: bool) -> Line<'static> {
+    let chars: Vec<char> = segment.chars().collect();
+    let col = local_col.min(chars.len());
+    let prefix = if is_cont { "↩ " } else { "" };
+    let before: String = chars[..col].iter().collect();
+    let at: String = if col < chars.len() { chars[col].to_string() } else { " ".to_string() };
+    let after:  String = if col + 1 < chars.len() { chars[col+1..].iter().collect() } else { String::new() };
+    Line::from(vec![
+        Span::styled(prefix, Style::default().fg(Color::DarkGray)),
+        Span::raw(before),
+        Span::styled(at, Style::default().fg(Color::Black).bg(Color::Yellow)),
+        Span::raw(after),
+    ])
+}
 
-    let status_p = Paragraph::new(status_line)
-        .style(Style::default().bg(Color::Reset));
+/// Colorize a single input line (hex data, CSV, JSON fragments).
+fn colorize_input_line(line: &str) -> Span<'static> {
+    let s = line.to_owned();
+    // JSON key markers
+    if s.contains("\":") { return Span::styled(s, Style::default().fg(Color::White)); }
+    // Hex-looking line
+    if s.len() > 6 && s.chars().all(|c| c.is_ascii_hexdigit() || c.is_whitespace()) {
+        return Span::styled(s, Style::default().fg(Color::Cyan));
+    }
+    Span::raw(s)
+}
 
-    f.render_widget(status_p, area);
+/// Colorize a single output line by content pattern.
+pub fn colorize_output_line(line: &str) -> Span<'static> {
+    let s = line.to_owned();
+    if s.starts_with('╔') || s.starts_with('╚') || s.starts_with('║') || s.starts_with("──") {
+        return Span::styled(s, Style::default().fg(Color::Blue));
+    }
+    if s.contains("Error") || s.contains("error") || s.contains('✗') || s.contains('⚠') {
+        return Span::styled(s, Style::default().fg(Color::Red));
+    }
+    let trimmed = s.trim_start();
+    if trimmed.starts_with('F') && trimmed.len() > 4 && trimmed[1..4].chars().all(|c| c.is_ascii_digit()) {
+        return Span::styled(s, Style::default().fg(Color::Cyan));
+    }
+    if s.contains("MTI") || s.contains("Bitmap") {
+        return Span::styled(s, Style::default().fg(Color::Magenta));
+    }
+    if s.contains("NET SETTLEMENT") || s.contains("KCV   :") || s.contains("PIN   :") || s.contains("Cryptogram") {
+        return Span::styled(s, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    }
+    if s.contains("APPROVED") || s.contains("Plaintext") {
+        return Span::styled(s, Style::default().fg(Color::Green));
+    }
+    if s.contains("DECLINED") || s.contains("REVERSED") {
+        return Span::styled(s, Style::default().fg(Color::Red));
+    }
+    if trimmed.starts_with("┌─") || trimmed.starts_with("│") || trimmed.starts_with("└─") {
+        return Span::styled(s, Style::default().fg(Color::Cyan));
+    }
+    Span::raw(s)
 }
