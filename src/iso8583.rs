@@ -1,3 +1,6 @@
+// ISO 8583 decoder
+#![allow(dead_code)]
+
 /// ISO 8583 Field Definition
 #[derive(Clone)]
 pub struct FieldDef {
