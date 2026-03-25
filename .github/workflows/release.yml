@@ -2,6 +2,7 @@ name: Rust Release
 
 permissions:
   contents: write
+  security-events: write
 
 on:
   push:
@@ -9,16 +10,56 @@ on:
       - "v*"
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-
+  # ============================================================
+  # JOB 1: Security Scan with trivy
+  # ============================================================
+  trivy-scan:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      - name: Run Trivy - Table (CRITICAL & HIGH)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          version: "latest"
+          format: "table"         
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"          
+          ignore-unfixed: true     
+          scanners: "vuln,secret"  
+
+      - name: Run Trivy - SARIF (untuk GitHub Security tab)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          version: "latest"
+          format: "sarif"
+          output: "trivy-results.sarif"
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"
+          ignore-unfixed: true
+          scanners: "vuln,secret"
+
+      - name: Upload hasil scan ke GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-results.sarif"
+
+  # ============================================================
+  # JOB 2: Build & Release 
+  # ============================================================
+  build:
+    needs: trivy-scan
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Build
