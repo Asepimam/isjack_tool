@@ -54,7 +54,7 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
     match app.active_tab {
         ActiveTab::Json       => draw_split(f, app, area, 40,
             " Input — 's' mode │ 'n' sample │ Ctrl+A select all │ Ctrl+Shift+C/X/V copy/cut/paste ",
-            " Output — Space=run │ ↑↓ PgUp PgDn scroll "),
+            " Output — Space=run │ ↑↓ PgUp PgDn scroll | Ctrl + C to Copy"),
         ActiveTab::Iso8583    => draw_split(f, app, area, 35,
             " Input — 'd' mode │ 'n' sample │ paste ISO message ",
             " Output — Space=decode │ ↑↓ PgUp PgDn scroll "),
