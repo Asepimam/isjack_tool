@@ -299,7 +299,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
             KeyCode::Char('c') if app.focus == Focus::Output => {
                 let output = app.current_output();
-                if let Ok(_) = copy_output_to_clipboard(output) {
+                if copy_output_to_clipboard(output).is_ok() {
                     let line_count = output.line_count();
                     app.set_status(format!("Output copied to clipboard ({} lines)", line_count), false);
                 } else {
