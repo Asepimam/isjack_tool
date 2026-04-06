@@ -25,6 +25,9 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use simulator::{AutoResponse, Framing};
 use std::{io, time::Duration};
+use std::thread;
+
+use crate::app::OutputBuffer;
 
 // ─── ISO 8583 Samples ─────────────────────────────────────────────────────────
 
@@ -216,6 +219,27 @@ fn handle_paste(app: &mut App, text: &str) {
     app.set_status(format!("Pasted {} chars", char_count), false);
 }
 
+fn copy_output_to_clipboard(output: &OutputBuffer) -> Result<(), String> {
+    let content = output.get_content();
+    if content.is_empty() {
+        return Err("Output kosong".to_string());
+    }
+
+    let content = content.to_string();
+    thread::spawn(move || {
+        match arboard::Clipboard::new() {
+            Ok(mut clipboard) => {
+                if let Err(e) = clipboard.set_text(content) {
+                    eprintln!("Gagal copy ke clipboard: {}", e);
+                }
+            }
+            Err(e) => eprintln!("Gagal inisialisasi clipboard: {}", e),
+        }
+    });
+
+    Ok(())
+}
+
 // ─── Top-level key dispatcher ────────────────────────────────────────────────
 
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
@@ -270,6 +294,17 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             KeyCode::Char('a') => {
                 app.current_input().select_all();
                 app.set_status("All selected — Ctrl+Shift+C copy, Ctrl+Shift+X cut, Del remove", false);
+                return;
+            }
+
+            KeyCode::Char('c') if app.focus == Focus::Output => {
+                let output = app.current_output();
+                if let Ok(_) = copy_output_to_clipboard(output) {
+                    let line_count = output.line_count();
+                    app.set_status(format!("Output copied to clipboard ({} lines)", line_count), false);
+                } else {
+                    app.set_status("Failed to copy output to clipboard", true);
+                }
                 return;
             }
             _ => {}

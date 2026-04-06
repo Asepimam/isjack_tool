@@ -418,6 +418,18 @@ impl OutputBuffer {
         let lines = self.line_count() as u16;
         lines.saturating_sub(visible_rows)
     }
+
+    pub fn get_content(&self) -> &str {
+        &self.content
+    }
+
+    pub fn get_selected_content(&self, start_line: usize, end_line: usize) -> String {
+        let lines: Vec<&str> = self.content.lines().collect();
+        let start = start_line.min(lines.len().saturating_sub(1));
+        let end = end_line.min(lines.len().saturating_sub(1)).max(start);
+        
+        lines[start..=end].join("\n")
+    }
 }
 
 // ─── App ─────────────────────────────────────────────────────────────────────
