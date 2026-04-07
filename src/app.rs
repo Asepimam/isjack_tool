@@ -298,8 +298,8 @@ impl InputBuffer {
         self.scroll = self.scroll.saturating_sub(1);
     }
 
-    pub fn scroll_down(&mut self, _visible_rows: u16) {
-        let max = self.max_scroll_vertical();
+    pub fn scroll_down(&mut self, visible_rows: u16) {
+        let max = (self.lines.len() as u16).saturating_sub(visible_rows);
         self.scroll = (self.scroll + 1).min(max);
     }
 
