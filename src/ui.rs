@@ -51,20 +51,21 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
+    let wrap_status = if active_input_buf(app).wrap { "WRAP" } else { "NOWRAP" };
     match app.active_tab {
         ActiveTab::Json       => draw_split(f, app, area, 40,
-            " Input — 's' mode │ 'n' sample │ Ctrl+A select all │ Ctrl+Shift+C/X/V copy/cut/paste ",
+            &format!(" Input — {} │ 's' mode │ 'n' sample │ Ctrl+A select all │ Ctrl+Shift+C/X/V copy/cut/paste │ Ctrl+W toggle wrap", wrap_status),
             " Output — Space=run │ ↑↓ PgUp PgDn scroll | Ctrl + C to Copy"),
         ActiveTab::Iso8583    => draw_split(f, app, area, 35,
-            " Input — 'd' mode │ 'n' sample │ paste ISO message ",
+            &format!(" Input — {} │ 'd' mode │ 'n' sample │ paste ISO message │ Ctrl+W toggle wrap", wrap_status),
             " Output — Space=decode │ ↑↓ PgUp PgDn scroll "),
         ActiveTab::Tlv        => draw_split(f, app, area, 35,
-            " Input — TLV/EMV hex │ 'n' sample ",
+            &format!(" Input — {} │ TLV/EMV hex │ 'n' sample │ Ctrl+W toggle wrap", wrap_status),
             " Output — Space=decode │ ↑↓ PgUp PgDn scroll "),
         ActiveTab::KeyMgmt    => draw_key_mgmt(f, app, area),
         ActiveTab::Simulator  => draw_simulator(f, app, area),
         ActiveTab::Settlement => draw_split(f, app, area, 45,
-            " Input — CSV │ 'r' reload sample ",
+            &format!(" Input — {} │ CSV │ 'r' reload sample │ Ctrl+W toggle wrap", wrap_status),
             " Report — Space=parse │ ↑↓ PgUp PgDn scroll "),
     }
 }
@@ -72,7 +73,7 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
 // ─── Generic split pane ───────────────────────────────────────────────────────
 
 fn draw_split(f: &mut Frame, app: &mut App, area: Rect, in_pct: u16,
-              in_title: &'static str, out_title: &'static str)
+              in_title: &str, out_title: &'static str)
 {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -83,20 +84,22 @@ fn draw_split(f: &mut Frame, app: &mut App, area: Rect, in_pct: u16,
     let out_focused = app.focus == Focus::Output;
 
     // ── INPUT ────────────────────────────────────────────────────────────────
+    let input_title = build_input_title(app, in_focused, in_title, chunks[0]);
     let in_block = Block::default()
         .borders(Borders::ALL)
-        .title(if in_focused { format!("▶{}", in_title) } else { in_title.to_string() })
+        .title(input_title)
         .border_style(border_style(in_focused));
     let in_inner = in_block.inner(chunks[0]);
     f.render_widget(in_block, chunks[0]);
 
-    // sync scroll with real viewport height, then render
     sync_and_render_input(f, app, in_inner, in_focused);
 
     // ── OUTPUT ───────────────────────────────────────────────────────────────
+    // FIX 2: build_output_title sekarang menerima &mut App
+    let output_title = build_output_title(app, out_focused, out_title, chunks[1]);
     let out_block = Block::default()
         .borders(Borders::ALL)
-        .title(if out_focused { format!("▶{}", out_title) } else { out_title.to_string() })
+        .title(output_title)
         .border_style(border_style(out_focused));
     let out_inner = out_block.inner(chunks[1]);
     f.render_widget(out_block, chunks[1]);
@@ -104,84 +107,141 @@ fn draw_split(f: &mut Frame, app: &mut App, area: Rect, in_pct: u16,
     render_output(f, app, out_inner);
 }
 
+fn build_input_title(app: &App, focused: bool, base: &str, area: Rect) -> String {
+    let buf = active_input_buf(app);
+    let line_count = buf.lines.len();
+    let vis_h = (area.height as usize).max(1);
+    let vis_w = area.width as usize;
+
+    let mut title = if focused { format!("▶ {}", base) } else { base.to_string() };
+
+    if buf.wrap {
+        if line_count > vis_h {
+            if buf.scroll > 0 { title.push_str(" ↑"); }
+            if (buf.scroll as usize) + vis_h < line_count { title.push_str(" ↓"); }
+        }
+    } else {
+        let longest = buf.lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        if longest > vis_w {
+            if buf.scroll_h > 0 { title.push_str(" ←"); }
+            if (buf.scroll_h as usize) + vis_w < longest { title.push_str(" →"); }
+        }
+    }
+
+    title
+}
+
+// FIX 2: ubah &App → &mut App agar bisa memanggil current_output() yang butuh &mut self
+fn build_output_title(app: &mut App, focused: bool, base: &str, area: Rect) -> String {
+    let content = match app.active_tab {
+        ActiveTab::Json       => &app.json_output.content,
+        ActiveTab::Iso8583    => &app.iso_output.content,
+        ActiveTab::Tlv        => &app.tlv_output.content,
+        ActiveTab::Settlement => &app.settle_output.content,
+        ActiveTab::KeyMgmt    => &app.key_output.content,
+        ActiveTab::Simulator  => &app.sim_output.content,
+    };
+
+    let line_count = content.lines().count();
+    let vis_h = (area.height as usize).max(1);
+    let mut title = if focused { format!("▶ {}", base) } else { base.to_string() };
+
+    if line_count > vis_h {
+        if app.current_output().scroll > 0 { title.push_str(" ↑"); }
+        if (app.current_output().scroll as usize) + vis_h < line_count { title.push_str(" ↓"); }
+    }
+
+    title
+}
+
 /// Sync scroll for the active input buffer using the actual viewport height,
 /// then render the wrapped content.
 fn sync_and_render_input(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
-    // We need the pane width to know how lines wrap
     let width = area.width.max(4) as usize;
     let height = area.height as usize;
 
-    // Get a snapshot of what we need (to avoid borrow split issues)
-    let (logical_lines, cursor_row, cursor_col, sel_anchor) = {
-        let buf = active_input_buf(app);
-        (buf.lines.clone(), buf.cursor_row, buf.cursor_col, buf.sel_anchor)
-    };
+    let buf = active_input_buf(app);
+    let do_wrap = buf.wrap;
 
-    // Pre-compute visual rows
-    let visual = build_visual_rows(&logical_lines, width);
-
-    // Find which visual row the cursor is on
-    let cursor_visual = visual.iter().position(|vr| {
-        vr.logical_row == cursor_row
-            && cursor_col >= vr.char_start
-            && (cursor_col < vr.char_start + vr.char_len || vr.is_last_of_logical)
-    }).unwrap_or(0);
-
-    // Sync scroll in visual-row space
-    {
-        let buf = active_input_buf_mut(app);
-        let vis = height.max(1);
-        let scroll = buf.scroll as usize;
-        let new_scroll = if cursor_visual < scroll {
-            cursor_visual as u16
-        } else if cursor_visual >= scroll + vis {
-            (cursor_visual - vis + 1) as u16
-        } else {
-            buf.scroll
+    if do_wrap {
+        // ── WRAP MODE ──
+        let (logical_lines, cursor_row, cursor_col, sel_anchor) = {
+            let buf = active_input_buf(app);
+            (buf.lines.clone(), buf.cursor_row, buf.cursor_col, buf.sel_anchor)
         };
-        buf.scroll = new_scroll;
-    }
 
-    let scroll = active_input_buf(app).scroll as usize;
+        let visual = build_visual_rows(&logical_lines, width);
 
-    // Render visible visual rows
-    let rendered: Vec<Line> = visual.iter()
-        .skip(scroll)
-        .take(height)
-        .map(|vr| {
-            let line = &logical_lines[vr.logical_row];
-            let chars: Vec<char> = line.chars().collect();
-            let seg_chars = &chars[vr.char_start..(vr.char_start + vr.char_len).min(chars.len())];
-            let seg: String = seg_chars.iter().collect();
+        let cursor_visual = visual.iter().position(|vr| {
+            vr.logical_row == cursor_row
+                && cursor_col >= vr.char_start
+                && (cursor_col < vr.char_start + vr.char_len || vr.is_last_of_logical)
+        }).unwrap_or(0);
 
-            if focused && vr.logical_row == cursor_row {
-                // Check if cursor is within this visual segment
-                let local_col = cursor_col.saturating_sub(vr.char_start);
-                if cursor_col >= vr.char_start && (cursor_col < vr.char_start + vr.char_len || vr.is_last_of_logical) {
-                    make_cursor_line(&seg, local_col, vr.is_continuation)
+        {
+            let buf = active_input_buf_mut(app);
+            let vis = height.max(1);
+            let scroll = buf.scroll as usize;
+            let new_scroll = if cursor_visual < scroll {
+                cursor_visual as u16
+            } else if cursor_visual >= scroll + vis {
+                (cursor_visual - vis + 1) as u16
+            } else {
+                buf.scroll
+            };
+            buf.scroll = new_scroll;
+        }
+
+        let scroll = active_input_buf(app).scroll as usize;
+
+        let rendered: Vec<Line> = visual.iter()
+            .skip(scroll)
+            .take(height)
+            .map(|vr| {
+                let line = &logical_lines[vr.logical_row];
+                let chars: Vec<char> = line.chars().collect();
+                let seg_chars = &chars[vr.char_start..(vr.char_start + vr.char_len).min(chars.len())];
+                let seg: String = seg_chars.iter().collect();
+
+                if focused && vr.logical_row == cursor_row {
+                    let local_col = cursor_col.saturating_sub(vr.char_start);
+                    if cursor_col >= vr.char_start && (cursor_col < vr.char_start + vr.char_len || vr.is_last_of_logical) {
+                        make_cursor_line(&seg, local_col, vr.is_continuation)
+                    } else if vr.is_continuation {
+                        Line::from(vec![
+                            Span::styled("↩ ", Style::default().fg(Color::DarkGray)),
+                            Span::raw(seg),
+                        ])
+                    } else {
+                        Line::from(Span::styled(seg, Style::default().fg(Color::White)))
+                    }
                 } else if vr.is_continuation {
                     Line::from(vec![
                         Span::styled("↩ ", Style::default().fg(Color::DarkGray)),
-                        Span::raw(seg),
+                        colorize_input_line(&seg),
                     ])
                 } else {
-                    // Highlight entire row as active line
-                    Line::from(Span::styled(seg, Style::default().fg(Color::White)))
+                    Line::from(colorize_input_line(&seg))
                 }
-            } else if vr.is_continuation {
-                Line::from(vec![
-                    Span::styled("↩ ", Style::default().fg(Color::DarkGray)),
-                    colorize_input_line(&seg),
-                ])
-            } else {
-                Line::from(colorize_input_line(&seg))
-            }
-        })
-        .collect();
+            })
+            .collect();
 
-    f.render_widget(Paragraph::new(rendered), area);
+        f.render_widget(Paragraph::new(rendered), area);
 
-    let _ = sel_anchor; // future: use for selection highlight
+        let _ = sel_anchor;
+    } else {
+        // ── NO-WRAP MODE ──
+        let (logical_lines, scroll_v, scroll_h) = {
+            let buf = active_input_buf(app);
+            (buf.lines.clone(), buf.scroll, buf.scroll_h)
+        };
+
+        let text = logical_lines.join("\n");
+        let paragraph = Paragraph::new(text)
+            .scroll((scroll_v, scroll_h));
+
+        f.render_widget(paragraph, area);
+    }
 }
 
 fn active_input_buf(app: &App) -> &InputBuffer {
@@ -245,10 +305,10 @@ fn render_output(f: &mut Frame, app: &mut App, area: Rect) {
 // ─── Visual row construction ──────────────────────────────────────────────────
 
 struct VisualRow {
-    logical_row:     usize,
-    char_start:      usize, // start char index in the logical line
-    char_len:        usize, // number of chars on this visual row
-    is_continuation: bool,  // not the first visual row of this logical line
+    logical_row:        usize,
+    char_start:         usize,
+    char_len:           usize,
+    is_continuation:    bool,
     is_last_of_logical: bool,
 }
 
@@ -307,17 +367,15 @@ fn wrap_text_lines(content: &str, width: usize) -> Vec<(String, bool)> {
 // ─── Key Management tab ──────────────────────────────────────────────────────
 
 fn draw_key_mgmt(f: &mut Frame, app: &mut App, area: Rect) {
-    // Dynamically include only active input fields so output gets more space
     let active_fields = app.key_op.active_field_count() as usize;
-    let mut constraints = vec![Constraint::Length(3)]; // op bar
+    let mut constraints = vec![Constraint::Length(3)];
     for _ in 0..active_fields { constraints.push(Constraint::Length(3)); }
-    constraints.push(Constraint::Min(0)); // output
+    constraints.push(Constraint::Min(0));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
         .split(area);
 
-    // Op bar
     let op_spans: Vec<Span> = KeyOp::all().iter().map(|&op| {
         let style = if op == app.key_op {
             Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
@@ -332,7 +390,6 @@ fn draw_key_mgmt(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(op_block, chunks[0]);
     f.render_widget(Paragraph::new(Line::from(op_spans)), op_inner);
 
-    // Input fields — only render active ones, using dynamic chunk indices
     let labels = app.key_op.field_labels();
     let mut chunk_idx = 1usize;
     for idx in 0..3usize {
@@ -347,46 +404,52 @@ fn draw_key_mgmt(f: &mut Frame, app: &mut App, area: Rect) {
         let inner = block.inner(rect);
         f.render_widget(block, rect);
 
-        // Sync + render with wrap
         let width  = inner.width.max(4) as usize;
         let height = inner.height as usize;
-        let (lines, cur_row, cur_col) = {
+        let (lines, cur_row, cur_col, do_wrap) = {
             let buf = &app.key_field[idx];
-            (buf.lines.clone(), buf.cursor_row, buf.cursor_col)
+            (buf.lines.clone(), buf.cursor_row, buf.cursor_col, buf.wrap)
         };
-        let visual = build_visual_rows(&lines, width);
-        let cursor_visual = visual.iter().position(|vr| {
-            vr.logical_row == cur_row && cur_col >= vr.char_start
-                && (cur_col < vr.char_start + vr.char_len || vr.is_last_of_logical)
-        }).unwrap_or(0);
-        {
-            let buf = &mut app.key_field[idx];
-            let scroll = buf.scroll as usize;
-            if cursor_visual < scroll { buf.scroll = cursor_visual as u16; }
-            else if cursor_visual >= scroll + height.max(1) { buf.scroll = (cursor_visual - height + 1) as u16; }
-        }
-        let scroll = app.key_field[idx].scroll as usize;
-        let rendered: Vec<Line> = visual.iter().skip(scroll).take(height).map(|vr| {
-            let line = &lines[vr.logical_row];
-            let chars: Vec<char> = line.chars().collect();
-            let seg: String = chars[vr.char_start..(vr.char_start+vr.char_len).min(chars.len())].iter().collect();
-            if is_focused && vr.logical_row == cur_row {
-                let local = cur_col.saturating_sub(vr.char_start);
-                if cur_col >= vr.char_start && (cur_col < vr.char_start + vr.char_len || vr.is_last_of_logical) {
-                    make_cursor_line(&seg, local, vr.is_continuation)
+
+        if do_wrap {
+            let visual = build_visual_rows(&lines, width);
+            let cursor_visual = visual.iter().position(|vr| {
+                vr.logical_row == cur_row && cur_col >= vr.char_start
+                    && (cur_col < vr.char_start + vr.char_len || vr.is_last_of_logical)
+            }).unwrap_or(0);
+            {
+                let buf = &mut app.key_field[idx];
+                let scroll = buf.scroll as usize;
+                if cursor_visual < scroll { buf.scroll = cursor_visual as u16; }
+                else if cursor_visual >= scroll + height.max(1) { buf.scroll = (cursor_visual - height + 1) as u16; }
+            }
+            let scroll = app.key_field[idx].scroll as usize;
+            let rendered: Vec<Line> = visual.iter().skip(scroll).take(height).map(|vr| {
+                let line = &lines[vr.logical_row];
+                let chars: Vec<char> = line.chars().collect();
+                let seg: String = chars[vr.char_start..(vr.char_start+vr.char_len).min(chars.len())].iter().collect();
+                if is_focused && vr.logical_row == cur_row {
+                    let local = cur_col.saturating_sub(vr.char_start);
+                    if cur_col >= vr.char_start && (cur_col < vr.char_start + vr.char_len || vr.is_last_of_logical) {
+                        make_cursor_line(&seg, local, vr.is_continuation)
+                    } else {
+                        Line::from(Span::raw(seg))
+                    }
+                } else if vr.is_continuation {
+                    Line::from(vec![Span::styled("↩ ", Style::default().fg(Color::DarkGray)), Span::raw(seg)])
                 } else {
                     Line::from(Span::raw(seg))
                 }
-            } else if vr.is_continuation {
-                Line::from(vec![Span::styled("↩ ", Style::default().fg(Color::DarkGray)), Span::raw(seg)])
-            } else {
-                Line::from(Span::raw(seg))
-            }
-        }).collect();
-        f.render_widget(Paragraph::new(rendered), inner);
+            }).collect();
+            f.render_widget(Paragraph::new(rendered), inner);
+        } else {
+            let scroll_v = app.key_field[idx].scroll;
+            let scroll_h = app.key_field[idx].scroll_h;
+            let text = lines.join("\n");
+            f.render_widget(Paragraph::new(text).scroll((scroll_v, scroll_h)), inner);
+        }
     }
 
-    // Output — uses the last chunk (dynamic index)
     let out_focused = app.focus == Focus::Output;
     let out_chunk = chunks[chunk_idx];
     let out_block = Block::default().borders(Borders::ALL)
@@ -413,7 +476,6 @@ fn draw_simulator(f: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Length(3), Constraint::Length(5), Constraint::Min(0)])
         .split(area);
 
-    // Config bar
     let running  = app.sim_server.is_running();
     let mode_str = match app.sim_mode { SimMode::Server => "SERVER", SimMode::Client => "CLIENT" };
     let status_span = if running {
@@ -434,54 +496,63 @@ fn draw_simulator(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(cfg_block, chunks[0]);
     f.render_widget(Paragraph::new(cfg_line), cfg_inner);
 
-    // Message input
     let msg_title = match app.sim_mode {
         SimMode::Client => format!(" → {}:{} — hex message (RAW or HEX-encoded) ", app.sim_host, app.sim_port),
         SimMode::Server => format!(" Port: {} — Space to start/stop server ", app.sim_port),
     };
     let msg_focused = app.focus == Focus::Input;
+
+    // FIX 3: prefix dengan `_` karena belum digunakan di title string
+    let _wrap_status = if app.sim_message.wrap { "WRAP" } else { "NOWRAP" };
+
     let msg_block = Block::default().borders(Borders::ALL)
-        .title(msg_title)
+        .title(format!("{} │ Ctrl+W toggle wrap", msg_title))
         .border_style(border_style(msg_focused));
     let msg_inner = msg_block.inner(chunks[1]);
     f.render_widget(msg_block, chunks[1]);
 
-    // Render input with wrap
     let width  = msg_inner.width.max(4) as usize;
     let height = msg_inner.height as usize;
-    let (lines, cur_row, cur_col) = {
+    let (lines, cur_row, cur_col, do_wrap) = {
         let b = &app.sim_message;
-        (b.lines.clone(), b.cursor_row, b.cursor_col)
+        (b.lines.clone(), b.cursor_row, b.cursor_col, b.wrap)
     };
-    let visual = build_visual_rows(&lines, width);
-    let cur_vis = visual.iter().position(|vr| {
-        vr.logical_row == cur_row && cur_col >= vr.char_start
-            && (cur_col < vr.char_start + vr.char_len || vr.is_last_of_logical)
-    }).unwrap_or(0);
-    {
-        let b = &mut app.sim_message;
-        let sc = b.scroll as usize;
-        if cur_vis < sc { b.scroll = cur_vis as u16; }
-        else if cur_vis >= sc + height.max(1) { b.scroll = (cur_vis - height + 1) as u16; }
-    }
-    let scroll = app.sim_message.scroll as usize;
-    let rendered: Vec<Line> = visual.iter().skip(scroll).take(height).map(|vr| {
-        let lc: Vec<char> = lines[vr.logical_row].chars().collect();
-        let seg: String = lc[vr.char_start..(vr.char_start+vr.char_len).min(lc.len())].iter().collect();
-        if msg_focused && vr.logical_row == cur_row {
-            let lc2 = cur_col.saturating_sub(vr.char_start);
-            if cur_col >= vr.char_start && (cur_col < vr.char_start + vr.char_len || vr.is_last_of_logical) {
-                make_cursor_line(&seg, lc2, vr.is_continuation)
+
+    if do_wrap {
+        let visual = build_visual_rows(&lines, width);
+        let cur_vis = visual.iter().position(|vr| {
+            vr.logical_row == cur_row && cur_col >= vr.char_start
+                && (cur_col < vr.char_start + vr.char_len || vr.is_last_of_logical)
+        }).unwrap_or(0);
+        {
+            let b = &mut app.sim_message;
+            let sc = b.scroll as usize;
+            if cur_vis < sc { b.scroll = cur_vis as u16; }
+            else if cur_vis >= sc + height.max(1) { b.scroll = (cur_vis - height + 1) as u16; }
+        }
+        let scroll = app.sim_message.scroll as usize;
+        let rendered: Vec<Line> = visual.iter().skip(scroll).take(height).map(|vr| {
+            let lc: Vec<char> = lines[vr.logical_row].chars().collect();
+            let seg: String = lc[vr.char_start..(vr.char_start+vr.char_len).min(lc.len())].iter().collect();
+            if msg_focused && vr.logical_row == cur_row {
+                let lc2 = cur_col.saturating_sub(vr.char_start);
+                if cur_col >= vr.char_start && (cur_col < vr.char_start + vr.char_len || vr.is_last_of_logical) {
+                    make_cursor_line(&seg, lc2, vr.is_continuation)
+                } else if vr.is_continuation {
+                    Line::from(vec![Span::styled("↩ ", Style::default().fg(Color::DarkGray)), Span::raw(seg)])
+                } else { Line::from(Span::raw(seg)) }
             } else if vr.is_continuation {
                 Line::from(vec![Span::styled("↩ ", Style::default().fg(Color::DarkGray)), Span::raw(seg)])
             } else { Line::from(Span::raw(seg)) }
-        } else if vr.is_continuation {
-            Line::from(vec![Span::styled("↩ ", Style::default().fg(Color::DarkGray)), Span::raw(seg)])
-        } else { Line::from(Span::raw(seg)) }
-    }).collect();
-    f.render_widget(Paragraph::new(rendered), msg_inner);
+        }).collect();
+        f.render_widget(Paragraph::new(rendered), msg_inner);
+    } else {
+        let scroll_v = app.sim_message.scroll;
+        let scroll_h = app.sim_message.scroll_h;
+        let text = lines.join("\n");
+        f.render_widget(Paragraph::new(text).scroll((scroll_v, scroll_h)), msg_inner);
+    }
 
-    // Log
     let log_focused = app.focus == Focus::Output;
     let log_block = Block::default().borders(Borders::ALL)
         .title(if log_focused { "▶ Log — ↑↓ PgUp PgDn scroll" } else { " Transaction Log " })
@@ -524,7 +595,6 @@ fn border_style(focused: bool) -> Style {
     else       { Style::default().fg(Color::DarkGray) }
 }
 
-/// Build a Line with the cursor character highlighted at `local_col`.
 pub fn make_cursor_line(segment: &str, local_col: usize, is_cont: bool) -> Line<'static> {
     let chars: Vec<char> = segment.chars().collect();
     let col = local_col.min(chars.len());
@@ -540,19 +610,15 @@ pub fn make_cursor_line(segment: &str, local_col: usize, is_cont: bool) -> Line<
     ])
 }
 
-/// Colorize a single input line (hex data, CSV, JSON fragments).
 fn colorize_input_line(line: &str) -> Span<'static> {
     let s = line.to_owned();
-    // JSON key markers
     if s.contains("\":") { return Span::styled(s, Style::default().fg(Color::White)); }
-    // Hex-looking line
     if s.len() > 6 && s.chars().all(|c| c.is_ascii_hexdigit() || c.is_whitespace()) {
         return Span::styled(s, Style::default().fg(Color::Cyan));
     }
     Span::raw(s)
 }
 
-/// Colorize a single output line by content pattern.
 pub fn colorize_output_line(line: &str) -> Span<'static> {
     let s = line.to_owned();
     if s.starts_with('╔') || s.starts_with('╚') || s.starts_with('║') || s.starts_with("──") {
