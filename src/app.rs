@@ -308,8 +308,8 @@ impl InputBuffer {
     }
 
     // FIX 1: prefix `visible_rows` dengan `_` karena tidak dipakai di body
-    pub fn page_down(&mut self, page: u16, _visible_rows: u16) {
-        let max = self.max_scroll_vertical();
+    pub fn page_down(&mut self, page: u16, visible_rows: u16) {
+        let max = (self.lines.len() as u16).saturating_sub(visible_rows);
         self.scroll = (self.scroll + page).min(max);
     }
 
