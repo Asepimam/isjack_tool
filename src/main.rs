@@ -240,6 +240,27 @@ fn copy_output_to_clipboard(output: &OutputBuffer) -> Result<(), String> {
     Ok(())
 }
 
+fn cut_output_to_clipboard(output: &OutputBuffer) -> Result<(), String> {
+    let content = output.get_content();
+    if content.is_empty() {
+        return Err("Output kosong".to_string());
+    }
+
+    let content = content.to_string();
+    thread::spawn(move || {
+        match arboard::Clipboard::new() {
+            Ok(mut clipboard) => {
+                if let Err(e) = clipboard.set_text(content) {
+                    eprintln!("Gagal cut ke clipboard: {}", e);
+                }
+            }
+            Err(e) => eprintln!("Gagal inisialisasi clipboard: {}", e),
+        }
+    });
+
+    Ok(())
+}
+
 // ─── Top-level key dispatcher ────────────────────────────────────────────────
 
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
@@ -305,6 +326,25 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 } else {
                     app.set_status("Failed to copy output to clipboard", true);
                 }
+                return;
+            }
+
+            KeyCode::Char('x') if app.focus == Focus::Output => {
+                let output = app.current_output();
+                if copy_output_to_clipboard(output).is_ok() {
+                    let line_count = output.line_count();
+                    output.set(String::new());
+                    app.set_status(format!("Output cut to clipboard ({} lines)", line_count), false);
+                } else {
+                    app.set_status("Failed to cut output to clipboard", true);
+                }
+            }
+
+            KeyCode::Char('w') => {
+                let input = app.current_input();
+                input.toggle_wrap();
+                let wrap_status = if input.wrap { "ON" } else { "OFF" };
+                app.set_status(format!("Word wrap {}", wrap_status), false);
                 return;
             }
             _ => {}
@@ -629,6 +669,21 @@ fn scroll_output(app: &mut App, code: KeyCode) {
     }
 }
 
+fn scroll_input(app: &mut App, code: KeyCode) {
+    let vis = 40u16; // atau ambil dari ukuran viewport
+    let input = app.current_input();
+    match code {
+        KeyCode::Up       => input.scroll_up(),
+        KeyCode::Down     => input.scroll_down(vis),
+        KeyCode::PageUp   => input.page_up(vis / 2),
+        KeyCode::PageDown => input.page_down(vis / 2, vis),
+        KeyCode::Char('g') => input.scroll_to_top(),
+        KeyCode::Char('G') => input.scroll_to_bottom(vis),
+        _ => {}
+    }
+}
+
+
 pub fn edit_buf(buf: &mut app::InputBuffer, code: KeyCode) {
     match code {
         KeyCode::Backspace  => { if buf.has_selection() { buf.delete_selection(); } else { buf.backspace(); } }
@@ -642,7 +697,7 @@ pub fn edit_buf(buf: &mut app::InputBuffer, code: KeyCode) {
         KeyCode::Home       => { buf.clear_selection(); buf.move_home();  }
         KeyCode::End        => { buf.clear_selection(); buf.move_end();   }
         KeyCode::PageUp     => { buf.clear_selection(); buf.page_up(10);  }
-        KeyCode::PageDown   => { buf.clear_selection(); buf.page_down(10);}
+        KeyCode::PageDown   => { buf.clear_selection(); buf.page_down(10, 40); } // Tambahkan visible_rows
         _ => {}
     }
 }
