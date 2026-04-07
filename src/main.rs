@@ -331,10 +331,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
             KeyCode::Char('x') if app.focus == Focus::Output => {
                 let output = app.current_output();
-                if cut_output_to_clipboard(output).is_ok() {
+                if copy_output_to_clipboard(output).is_ok() {
                     let line_count = output.line_count();
-                    app.set_status(format!("Output cut to clipboad ({} lines)", line_count), false);
-                }else {
+                    output.set(String::new());
+                    app.set_status(format!("Output cut to clipboard ({} lines)", line_count), false);
+                } else {
                     app.set_status("Failed to cut output to clipboard", true);
                 }
             }
