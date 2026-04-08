@@ -44,7 +44,7 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(
         Tabs::new(titles)
             .select(selected)
-            .block(Block::default().borders(Borders::ALL).title(" ⬡ ISJack-Tools v1.0 — Payment Gateway Toolkit "))
+            .block(Block::default().borders(Borders::ALL).title(" ⬡ ISJack-Tools v1.1— Payment Gateway Toolkit "))
             .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         area,
     );
